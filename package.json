@@ -1,11 +1,11 @@
 {
-  "name": "telegram-task-bot",
+  "name": "taskbot",
   "version": "1.0.0",
   "description": "Simple Telegram Task Bot",
-  "main": "telegram-task-bot.js",
+  "main": "taskbot.js",
   "type": "module",
   "scripts": {
-    "start": "node telegram-task-bot.js"
+    "start": "node taskbot.js"
   },
   "dependencies": {
     "node-telegram-bot-api": "^0.66.0",
