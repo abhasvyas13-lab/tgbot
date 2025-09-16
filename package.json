@@ -1,0 +1,14 @@
+{
+  "name": "telegram-task-bot",
+  "version": "1.0.0",
+  "description": "Simple Telegram Task Bot",
+  "main": "telegram-task-bot.js",
+  "type": "module",
+  "scripts": {
+    "start": "node telegram-task-bot.js"
+  },
+  "dependencies": {
+    "node-telegram-bot-api": "^0.66.0",
+    "node-cron": "^3.0.2"
+  }
+}
