@@ -1,7 +1,7 @@
 import TelegramBot from "node-telegram-bot-api";
 import cron from "node-cron";
 import express from "express";
-import fetch from "node-fetch"; // make sure this is in package.json
+import fetch from "node-fetch";
 
 const TOKEN = "7674031536:AAEYlgD1ufhYXGIs6nYCxOcD1I1NsFLOqrg"; 
 const bot = new TelegramBot(TOKEN, { polling: true });
@@ -12,6 +12,9 @@ function getTaskList(chatId) {
   if (!tasks[chatId]) tasks[chatId] = [];
   return tasks[chatId];
 }
+
+// --- Track User State (Add/Edit modes) ---
+let userStates = {}; // { chatId: { mode: "add" | "edit", index?: number } }
 
 // --- Main Menu ---
 function mainMenu(chatId) {
@@ -35,19 +38,15 @@ bot.onText(/\/start/, (msg) => {
   mainMenu(chatId);
 });
 
-// --- Handle Buttons ---
+// --- Handle Button Clicks ---
 bot.on("callback_query", async (query) => {
   const chatId = query.message.chat.id;
   const data = query.data;
 
   // ➕ Add Task
   if (data === "add_task") {
-    await bot.sendMessage(chatId, "✍️ Send me the task you want to add:");
-    bot.once("message", (msg) => {
-      getTaskList(chatId).push({ task: msg.text, done: false });
-      bot.sendMessage(chatId, `✅ Task added: ${msg.text}`);
-      mainMenu(chatId);
-    });
+    userStates[chatId] = { mode: "add" };
+    return bot.sendMessage(chatId, "✍️ Send me the task you want to add:");
   }
 
   // ✅ Mark Task Done
@@ -58,7 +57,7 @@ bot.on("callback_query", async (query) => {
       return mainMenu(chatId);
     }
     const buttons = list.map((t, i) => [{ text: `⏳ ${t.task}`, callback_data: `done_${i}` }]);
-    bot.sendMessage(chatId, "Select a task to mark done:", {
+    return bot.sendMessage(chatId, "Select a task to mark done:", {
       reply_markup: { inline_keyboard: buttons },
     });
   }
@@ -70,7 +69,7 @@ bot.on("callback_query", async (query) => {
       list[index].done = true;
       bot.sendMessage(chatId, `🎉 Marked done: ${list[index].task}`);
     }
-    mainMenu(chatId);
+    return mainMenu(chatId);
   }
 
   // ✏️ Edit Task
@@ -81,7 +80,7 @@ bot.on("callback_query", async (query) => {
       return mainMenu(chatId);
     }
     const buttons = list.map((t, i) => [{ text: `${t.done ? "✅" : "⏳"} ${t.task}`, callback_data: `edit_${i}` }]);
-    bot.sendMessage(chatId, "Select a task to edit:", {
+    return bot.sendMessage(chatId, "Select a task to edit:", {
       reply_markup: { inline_keyboard: buttons },
     });
   }
@@ -90,13 +89,8 @@ bot.on("callback_query", async (query) => {
     const index = parseInt(data.split("_")[1]);
     const list = getTaskList(chatId);
     if (!list[index]) return mainMenu(chatId);
-
-    await bot.sendMessage(chatId, `✍️ Send the new text for "${list[index].task}":`);
-    bot.once("message", (msg) => {
-      list[index].task = msg.text;
-      bot.sendMessage(chatId, `✏️ Task updated to: ${msg.text}`);
-      mainMenu(chatId);
-    });
+    userStates[chatId] = { mode: "edit", index };
+    return bot.sendMessage(chatId, `✍️ Send the new text for "${list[index].task}":`);
   }
 
   // 🗑 Delete Task
@@ -107,7 +101,7 @@ bot.on("callback_query", async (query) => {
       return mainMenu(chatId);
     }
     const buttons = list.map((t, i) => [{ text: `${t.done ? "✅" : "⏳"} ${t.task}`, callback_data: `delete_${i}` }]);
-    bot.sendMessage(chatId, "Select a task to delete:", {
+    return bot.sendMessage(chatId, "Select a task to delete:", {
       reply_markup: { inline_keyboard: buttons },
     });
   }
@@ -119,7 +113,7 @@ bot.on("callback_query", async (query) => {
       const removed = list.splice(index, 1);
       bot.sendMessage(chatId, `🗑 Deleted task: ${removed[0].task}`);
     }
-    mainMenu(chatId);
+    return mainMenu(chatId);
   }
 
   // 📜 Show Tasks
@@ -128,13 +122,34 @@ bot.on("callback_query", async (query) => {
     if (list.length === 0) {
       bot.sendMessage(chatId, "📭 No tasks found.");
     } else {
-      const formatted = list
-        .map((t) => `${t.done ? "✅" : "⏳"} ${t.task}`)
-        .join("\n");
+      const formatted = list.map((t) => `${t.done ? "✅" : "⏳"} ${t.task}`).join("\n");
       bot.sendMessage(chatId, `📋 Your tasks:\n${formatted}`);
     }
-    mainMenu(chatId);
+    return mainMenu(chatId);
   }
+});
+
+// --- Handle Add/Edit Responses ---
+bot.on("message", (msg) => {
+  const chatId = msg.chat.id;
+  if (!userStates[chatId]) return; // ignore if no active state
+  const state = userStates[chatId];
+
+  if (state.mode === "add") {
+    getTaskList(chatId).push({ task: msg.text, done: false });
+    bot.sendMessage(chatId, `✅ Task added: ${msg.text}`);
+  }
+
+  if (state.mode === "edit") {
+    const list = getTaskList(chatId);
+    if (list[state.index]) {
+      list[state.index].task = msg.text;
+      bot.sendMessage(chatId, `✏️ Task updated to: ${msg.text}`);
+    }
+  }
+
+  delete userStates[chatId]; // clear state after handling
+  mainMenu(chatId);
 });
 
 // --- Daily Reminders ---
