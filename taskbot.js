@@ -1,6 +1,7 @@
 import TelegramBot from "node-telegram-bot-api";
 import cron from "node-cron";
 import express from "express";
+import fetch from "node-fetch"; // make sure this is in package.json
 
 const TOKEN = "7674031536:AAEYlgD1ufhYXGIs6nYCxOcD1I1NsFLOqrg"; 
 const bot = new TelegramBot(TOKEN, { polling: true });
@@ -155,4 +156,15 @@ app.get("/", (req, res) => res.send("✅ Telegram Task Bot is running!"));
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`🌐 Web service running on port ${PORT}`));
 
-console.log("✅ Telegram Task Bot with Full CRUD is running...");
+// 🔄 Self-Ping every 5 minutes
+const SELF_URL = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
+setInterval(async () => {
+  try {
+    const res = await fetch(SELF_URL);
+    console.log(`🔄 Keep-alive ping: ${res.status} at ${new Date().toLocaleTimeString()}`);
+  } catch (err) {
+    console.error("⚠️ Keep-alive ping failed:", err.message);
+  }
+}, 5 * 60 * 1000);
+
+console.log("✅ Telegram Task Bot with Full CRUD + Keep-Alive is running...");
