@@ -3,30 +3,40 @@ import cron from "node-cron";
 import express from "express";
 import fetch from "node-fetch";
 
-const TOKEN = "7674031536:AAEYlgD1ufhYXGIs6nYCxOcD1I1NsFLOqrg"; 
+const TOKEN = "7674031536:AAEYlgD1ufhYXGIs6nYCxOcD1I1NsFLOqrg";
 const bot = new TelegramBot(TOKEN, { polling: true });
 
-// --- Simple In-Memory Task Store ---
-let tasks = {};
+// --- Persistent Data ---
+let tasks = {}; // { chatId: [ {task, done} ] }
+let reminderTimes = {}; // { chatId: { morning: "HH:mm", evening: "HH:mm" } }
+let reminderJobs = {}; // dynamic cron jobs per user
+
 function getTaskList(chatId) {
   if (!tasks[chatId]) tasks[chatId] = [];
   return tasks[chatId];
 }
 
-// --- Track User State (Add/Edit modes) ---
-let userStates = {}; // { chatId: { mode: "add" | "edit", index?: number } }
+// --- User State ---
+let userStates = {}; // track add/edit states
 
-// --- Main Menu ---
+// --- Pagination Helper ---
+function paginate(array, pageSize, page) {
+  const totalPages = Math.ceil(array.length / pageSize);
+  const slice = array.slice(page * pageSize, (page + 1) * pageSize);
+  return { slice, totalPages };
+}
+
+// --- Persistent Main Menu ---
 function mainMenu(chatId) {
-  bot.sendMessage(chatId, "📋 What do you want to do?", {
+  bot.sendMessage(chatId, "📋 Main Menu", {
     reply_markup: {
-      inline_keyboard: [
-        [{ text: "➕ Add Task", callback_data: "add_task" }],
-        [{ text: "✅ Mark Task Done", callback_data: "mark_done" }],
-        [{ text: "✏️ Edit Task", callback_data: "edit_task" }],
-        [{ text: "🗑 Delete Task", callback_data: "delete_task" }],
-        [{ text: "📜 Show Tasks", callback_data: "show_tasks" }],
+      keyboard: [
+        ["➕ Add Task", "✅ Mark Task Done"],
+        ["✏️ Edit Task", "🗑 Delete Task"],
+        ["📜 Show Tasks", "⏰ Set Reminder"],
       ],
+      resize_keyboard: true,
+      one_time_keyboard: false,
     },
   });
 }
@@ -38,28 +48,114 @@ bot.onText(/\/start/, (msg) => {
   mainMenu(chatId);
 });
 
-// --- Handle Button Clicks ---
-bot.on("callback_query", async (query) => {
-  const chatId = query.message.chat.id;
-  const data = query.data;
+// --- Handle Menu Button Presses ---
+bot.on("message", (msg) => {
+  const chatId = msg.chat.id;
+  const text = msg.text;
+  const state = userStates[chatId];
 
-  // ➕ Add Task
-  if (data === "add_task") {
+  // Handle states first (add/edit)
+  if (state?.mode === "add") {
+    getTaskList(chatId).push({ task: text, done: false });
+    bot.sendMessage(chatId, `✅ Task added: ${text}`);
+    delete userStates[chatId];
+    return mainMenu(chatId);
+  }
+
+  if (state?.mode === "edit") {
+    const list = getTaskList(chatId);
+    if (list[state.index]) {
+      list[state.index].task = text;
+      bot.sendMessage(chatId, `✏️ Task updated: ${text}`);
+    }
+    delete userStates[chatId];
+    return mainMenu(chatId);
+  }
+
+  // Menu actions
+  if (text === "➕ Add Task") {
     userStates[chatId] = { mode: "add" };
     return bot.sendMessage(chatId, "✍️ Send me the task you want to add:");
   }
 
-  // ✅ Mark Task Done
-  if (data === "mark_done") {
+  if (text === "✅ Mark Task Done") {
     const list = getTaskList(chatId).filter((t) => !t.done);
-    if (list.length === 0) {
-      bot.sendMessage(chatId, "🎉 No pending tasks!");
-      return mainMenu(chatId);
-    }
-    const buttons = list.map((t, i) => [{ text: `⏳ ${t.task}`, callback_data: `done_${i}` }]);
-    return bot.sendMessage(chatId, "Select a task to mark done:", {
-      reply_markup: { inline_keyboard: buttons },
+    if (list.length === 0) return bot.sendMessage(chatId, "🎉 No pending tasks!");
+    return sendPaginatedTasks(chatId, list, "done");
+  }
+
+  if (text === "✏️ Edit Task") {
+    const list = getTaskList(chatId);
+    if (list.length === 0) return bot.sendMessage(chatId, "📭 No tasks to edit.");
+    return sendPaginatedTasks(chatId, list, "edit");
+  }
+
+  if (text === "🗑 Delete Task") {
+    const list = getTaskList(chatId);
+    if (list.length === 0) return bot.sendMessage(chatId, "📭 No tasks to delete.");
+    return sendPaginatedTasks(chatId, list, "delete");
+  }
+
+  if (text === "📜 Show Tasks") {
+    const list = getTaskList(chatId);
+    if (list.length === 0) return bot.sendMessage(chatId, "📭 No tasks found.");
+    return sendPaginatedTasks(chatId, list, "show");
+  }
+
+  if (text === "⏰ Set Reminder") {
+    return bot.sendMessage(chatId, "Which reminder do you want to set?", {
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: "🌅 Morning Reminder", callback_data: "set_morning" }],
+          [{ text: "🌆 Evening Reminder", callback_data: "set_evening" }],
+        ],
+      },
     });
+  }
+});
+
+// --- Paginated Task Display ---
+function sendPaginatedTasks(chatId, list, action, page = 0) {
+  const pageSize = 5;
+  const { slice, totalPages } = paginate(list, pageSize, page);
+
+  const buttons = slice.map((t, i) => {
+    const index = page * pageSize + i;
+    return [
+      {
+        text:
+          action === "show"
+            ? `${t.done ? "✅" : "⏳"} ${t.task}`
+            : action === "done"
+            ? `✅ ${t.task}`
+            : action === "delete"
+            ? `🗑 ${t.task}`
+            : `✏️ ${t.task}`,
+        callback_data: `${action}_${index}`,
+      },
+    ];
+  });
+
+  if (totalPages > 1) {
+    const nav = [];
+    if (page > 0) nav.push({ text: "⬅ Prev", callback_data: `${action}_page_${page - 1}` });
+    if (page < totalPages - 1) nav.push({ text: "Next ➡", callback_data: `${action}_page_${page + 1}` });
+    buttons.push(nav);
+  }
+
+  bot.sendMessage(chatId, `📋 Tasks (Page ${page + 1}/${totalPages}):`, {
+    reply_markup: { inline_keyboard: buttons },
+  });
+}
+
+// --- Inline Callback Handlers ---
+bot.on("callback_query", (query) => {
+  const chatId = query.message.chat.id;
+  const data = query.data;
+
+  if (data.includes("_page_")) {
+    const [action, , page] = data.split("_");
+    return sendPaginatedTasks(chatId, getTaskList(chatId), action, parseInt(page));
   }
 
   if (data.startsWith("done_")) {
@@ -67,43 +163,9 @@ bot.on("callback_query", async (query) => {
     const list = getTaskList(chatId);
     if (list[index]) {
       list[index].done = true;
-      bot.sendMessage(chatId, `🎉 Marked done: ${list[index].task}`);
+      bot.sendMessage(chatId, `✅ Completed: ${list[index].task}`);
     }
     return mainMenu(chatId);
-  }
-
-  // ✏️ Edit Task
-  if (data === "edit_task") {
-    const list = getTaskList(chatId);
-    if (list.length === 0) {
-      bot.sendMessage(chatId, "📭 No tasks to edit.");
-      return mainMenu(chatId);
-    }
-    const buttons = list.map((t, i) => [{ text: `${t.done ? "✅" : "⏳"} ${t.task}`, callback_data: `edit_${i}` }]);
-    return bot.sendMessage(chatId, "Select a task to edit:", {
-      reply_markup: { inline_keyboard: buttons },
-    });
-  }
-
-  if (data.startsWith("edit_")) {
-    const index = parseInt(data.split("_")[1]);
-    const list = getTaskList(chatId);
-    if (!list[index]) return mainMenu(chatId);
-    userStates[chatId] = { mode: "edit", index };
-    return bot.sendMessage(chatId, `✍️ Send the new text for "${list[index].task}":`);
-  }
-
-  // 🗑 Delete Task
-  if (data === "delete_task") {
-    const list = getTaskList(chatId);
-    if (list.length === 0) {
-      bot.sendMessage(chatId, "📭 No tasks to delete.");
-      return mainMenu(chatId);
-    }
-    const buttons = list.map((t, i) => [{ text: `${t.done ? "✅" : "⏳"} ${t.task}`, callback_data: `delete_${i}` }]);
-    return bot.sendMessage(chatId, "Select a task to delete:", {
-      reply_markup: { inline_keyboard: buttons },
-    });
   }
 
   if (data.startsWith("delete_")) {
@@ -111,67 +173,76 @@ bot.on("callback_query", async (query) => {
     const list = getTaskList(chatId);
     if (list[index]) {
       const removed = list.splice(index, 1);
-      bot.sendMessage(chatId, `🗑 Deleted task: ${removed[0].task}`);
+      bot.sendMessage(chatId, `🗑 Deleted: ${removed[0].task}`);
     }
     return mainMenu(chatId);
   }
 
-  // 📜 Show Tasks
-  if (data === "show_tasks") {
-    const list = getTaskList(chatId);
-    if (list.length === 0) {
-      bot.sendMessage(chatId, "📭 No tasks found.");
-    } else {
-      const formatted = list.map((t) => `${t.done ? "✅" : "⏳"} ${t.task}`).join("\n");
-      bot.sendMessage(chatId, `📋 Your tasks:\n${formatted}`);
-    }
+  if (data.startsWith("edit_")) {
+    const index = parseInt(data.split("_")[1]);
+    userStates[chatId] = { mode: "edit", index };
+    return bot.sendMessage(chatId, "✍️ Send new text for this task:");
+  }
+
+  if (data === "set_morning" || data === "set_evening") {
+    const type = data === "set_morning" ? "morning" : "evening";
+    return sendTimePicker(chatId, type);
+  }
+
+  if (data.startsWith("time_")) {
+    const [_, type, time] = data.split("_");
+    if (!reminderTimes[chatId]) reminderTimes[chatId] = {};
+    reminderTimes[chatId][type] = time;
+    scheduleUserReminder(chatId, type, time);
+    bot.sendMessage(chatId, `✅ ${type === "morning" ? "Morning" : "Evening"} reminder set for ${time}`);
     return mainMenu(chatId);
   }
 });
 
-// --- Handle Add/Edit Responses ---
-bot.on("message", (msg) => {
-  const chatId = msg.chat.id;
-  if (!userStates[chatId]) return; // ignore if no active state
-  const state = userStates[chatId];
+// --- Time Picker Helper ---
+function sendTimePicker(chatId, type) {
+  const hours = type === "morning"
+    ? ["06:00", "07:00", "08:00", "09:00", "10:00", "11:00"]
+    : ["16:00", "17:00", "18:00", "19:00", "20:00", "21:00"];
+  const buttons = hours.map((h) => [{ text: h, callback_data: `time_${type}_${h}` }]);
+  bot.sendMessage(chatId, `🕒 Choose ${type} reminder time:`, {
+    reply_markup: { inline_keyboard: buttons },
+  });
+}
 
-  if (state.mode === "add") {
-    getTaskList(chatId).push({ task: msg.text, done: false });
-    bot.sendMessage(chatId, `✅ Task added: ${msg.text}`);
-  }
+// --- Schedule Individual User Reminders ---
+function scheduleUserReminder(chatId, type, time) {
+  if (!reminderJobs[chatId]) reminderJobs[chatId] = {};
+  if (reminderJobs[chatId][type]) reminderJobs[chatId][type].stop();
 
-  if (state.mode === "edit") {
-    const list = getTaskList(chatId);
-    if (list[state.index]) {
-      list[state.index].task = msg.text;
-      bot.sendMessage(chatId, `✏️ Task updated to: ${msg.text}`);
-    }
-  }
-
-  delete userStates[chatId]; // clear state after handling
-  mainMenu(chatId);
-});
-
-// --- Daily Reminders ---
-async function sendReminders() {
-  for (const [chatId, userTasks] of Object.entries(tasks)) {
-    const pending = userTasks.filter((t) => !t.done);
+  const [hour, minute] = time.split(":");
+  reminderJobs[chatId][type] = cron.schedule(`${minute} ${hour} * * *`, async () => {
+    const pending = getTaskList(chatId).filter((t) => !t.done);
     if (pending.length > 0) {
       const list = pending.map((t) => `⏳ ${t.task}`).join("\n");
-      await bot.sendMessage(chatId, `🔔 Reminder:\n${list}`);
+      await bot.sendMessage(chatId, `🔔 ${type === "morning" ? "Morning" : "Evening"} Reminder:\n${list}`);
     }
-  }
+  }, { timezone: "Asia/Kolkata" });
 }
-cron.schedule("0 10 * * *", sendReminders, { timezone: "Asia/Kolkata" });
-cron.schedule("0 17 * * *", sendReminders, { timezone: "Asia/Kolkata" });
 
-// --- Keep Alive on Render ---
+// --- Weekly Summary (Friday 4 PM) ---
+cron.schedule("0 16 * * FRI", async () => {
+  for (const [chatId, userTasks] of Object.entries(tasks)) {
+    const done = userTasks.filter((t) => t.done);
+    const message =
+      done.length > 0
+        ? `📊 Weekly Summary:\n${done.map((t) => `✅ ${t.task}`).join("\n")}`
+        : "📊 Weekly Summary: No tasks completed this week.";
+    await bot.sendMessage(chatId, message);
+  }
+}, { timezone: "Asia/Kolkata" });
+
+// --- Keep Alive for Render ---
 const app = express();
 app.get("/", (req, res) => res.send("✅ Telegram Task Bot is running!"));
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`🌐 Web service running on port ${PORT}`));
 
-// 🔄 Self-Ping every 5 minutes
 const SELF_URL = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
 setInterval(async () => {
   try {
@@ -182,4 +253,4 @@ setInterval(async () => {
   }
 }, 5 * 60 * 1000);
 
-console.log("✅ Telegram Task Bot with Full CRUD + Keep-Alive is running...");
+console.log("✅ Task Bot with Menu, Pagination, Dynamic Reminders & Keep-Alive is running...");
