@@ -3,7 +3,7 @@ import cron from "node-cron";
 import express from "express";
 import fetch from "node-fetch";
 
-const TOKEN    = process.env.BOT_TOKEN;
+const TOKEN    = "7674031536:AAEYlgD1ufhYXGIs6nYCxOcD1I1NsFLOqrg";
 const GROQ_KEY = process.env.GROQ_API_KEY;
 const PORT     = process.env.PORT || 3000;
 const SELF_URL = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
